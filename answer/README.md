@@ -1,43 +1,182 @@
-# Project 4 Reverse Engineering Report: EditLens
+# QUESTION 1
 
-* **Project Name:** EditLens
-* **Repository:** https://github.com/pangramlabs/EditLens
-* **Project Category:** AI Training & Optimisation
-* **Deadline:** April 3rd, 2026
+**EditLens shifts from binary classification (human vs. AI-generated) to continuous scoring (0–1 scale representing degree of AI intervention). Why is continuous scoring more useful than binary classification for detecting AI text?**
 
-## 1. Project Overview and Key Components
+---
 
-EditLens (ICLR 2026) quantifies how much AI editing is present in a piece of text. The repository provides training and inference pipelines that turn continuous edit-intensity scores into bucketed classification targets, then decode predictions back into smooth scores. Two reference setups are included: a RoBERTa-Large classifier and a Llama-3.2-3B QLoRA variant. Utilities cover text cleaning, bucket assignment, evaluation scripts, and standalone scoring metrics that mirror the paper’s cosine-distance and soft n-gram formulations. Example datasets and ready-to-run configs make it possible to reproduce the paper’s results or adapt the approach to new corpora.
+## Short Answer
 
-### Repository Analysis Summary
+Continuous scoring is more useful because AI-generated text lies on a **spectrum of edits**, not a strict binary. Binary classification introduces **label noise, ambiguity, and loss of information**, whereas continuous scoring preserves the **degree of transformation**.
 
-```
-EditLens/
-|-- README.md                 - Primary README with paper link, setup, training, and inference commands.
-|-- requirements.txt          - Python dependencies for training, inference, and scoring.
-|-- configs/
-|   |-- roberta.yaml          - Hydra config for the RoBERTa-Large bucketed classifier.
-|   |-- llama.yaml            - Hydra config for the Llama-3.2-3B QLoRA classifier (4-bit, LoRA targets).
-|-- scripts/
-|   |-- train.py              - Hydra entry point to fine-tune models; supports LoRA/QLoRA, W&B logging, and metric computation.
-|   |-- inference.py          - Runs inference on HuggingFace datasets, auto-inferring bucket count, and writes bucket/score columns.
-|   |-- preprocess.py         - Text normalization (emoji, boilerplate removal), word counts, and score-to-bucket mapping utilities.
-|   |-- eval/
-|   |   |-- binary_eval.py    - Evaluation helpers for binary detection settings.
-|   |   |-- ternary_eval.py   - Evaluation helpers for three-class setups.
-|   |   |-- threshold.py      - Threshold sweeping utilities for calibration.
-|   |-- scoring/
-|       |-- cosine_distance.py - Standalone cosine-distance metric using sentence embeddings.
-|       |-- soft_ngrams.py     - Soft n-gram overlap metric capturing novel phrase content.
-|-- data/
-|   |-- raid_10k.csv          - Sample RAID corpus slice for experiments.
-|   |-- val.csv               - Validation split referenced by configs.
-|   |-- test.csv              - General test set.
-|   |-- test_enron.csv        - Enron-specific test subset.
-|   |-- test_llama.csv        - Llama-generated test subset.
-|   |-- human_detectors.csv   - Human-produced detector comparisons.
-|   |-- nonnative_english.csv - Non-native English subset for robustness checks.
-```
+---
 
-All ten project questions are answered separately in `Q1.md` through `Q10.md`; `final answers proj4.md` aggregates them in one place.
+## 1. General ML Intuition: Why Binary Classification Fails
 
+### Assumption in Binary Classification
+
+Binary classification assumes **two separable distributions**:
+
+\[
+P(x \mid \text{human}) \quad \text{vs} \quad P(x \mid \text{AI})
+\]
+
+This only works when:
+- Data is cleanly separable  
+- Labels are well-defined  
+
+❌ Modern AI-edited text violates both assumptions.
+
+---
+
+### Reality: Data Lies on a Continuum
+
+Text exists on a **continuous spectrum**:
+
+- Human-written  
+- Lightly edited  
+- Paraphrased  
+- Heavily rewritten  
+- Fully AI-generated  
+
+So instead of:
+
+\[
+y \in \{0,1\}
+\]
+
+we should model:
+
+\[
+y \in [0,1]
+\]
+
+---
+
+### Problems with Binary Classification
+
+- Hard decision boundary:
+  \[
+  \hat{y} = \mathbb{1}(f(x) > \tau)
+  \]
+
+- Loss of intermediate information  
+- Instability near threshold  
+
+---
+
+### Key ML Issue: Label Noise
+
+Binary labels collapse distinct cases:
+
+- Light edit → labeled AI  
+- Heavy rewrite → labeled AI  
+
+But these correspond to very different underlying values:
+
+\[
+\Delta_1 \ll \Delta_2
+\]
+
+This causes the model to learn a **blurred boundary** instead of meaningful structure.
+
+---
+
+### Continuous Scoring Fix
+
+Model learns:
+
+\[
+f(x) \approx \mathbb{E}[\Delta \mid x]
+\]
+
+**Benefits:**
+- Preserves ordering  
+- Captures gradual transitions  
+- Enables calibration  
+
+---
+
+## 2. Paper Insight: AI Editing is a Latent Continuous Variable
+
+### Core Shift
+
+Instead of:
+
+> “Was this written by AI?”
+
+The paper asks:
+
+\[
+\text{Estimate } \Delta(x, y)
+\]
+
+where:
+- \( x \): original human text  
+- \( y \): edited text  
+
+---
+
+### Training Objective
+
+\[
+\min_\theta \; \mathbb{E}_{(x,y)} \left[ (f_\theta(y) - \Delta(x,y))^2 \right]
+\]
+
+---
+
+### Inference
+
+Only \( y \) is observed:
+
+\[
+\hat{\Delta}(y) = f_\theta(y)
+\]
+
+---
+
+### Why Binary Fails
+
+#### (a) Editing ≠ Generation
+Most usage is editing, not full generation.
+
+#### (b) Mixed Authorship
+
+- **Heterogeneous:** separable  
+- **Homogeneous:** entangled  
+
+👉 No clear ground-truth label exists.
+
+---
+
+### Key Insight
+
+Binary classification is **ill-posed** because:
+
+- No clear human vs AI boundary  
+- Only **magnitude of transformation** is observable  
+
+---
+
+## 3. How the Code Implements Continuous Scoring
+
+### (A) Training: Bucketed Classification
+
+Continuous score:
+
+\[
+s \in [0,1]
+\]
+
+Mapped to bucket:
+
+\[
+j = \lfloor s \cdot (N-1) \rfloor
+\]
+
+---
+
+### (B) Inference: Recover Continuous Score
+
+```python
+probs = softmax(output.predictions)
+score = (probs @ bucket_labels) / (N - 1)
